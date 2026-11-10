@@ -1,0 +1,62 @@
+import {chromium} from '@playwright/test';
+import {mkdtemp,rm,mkdir} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import path from 'node:path';
+const profile=await mkdtemp(path.join(tmpdir(),'youblock-qa-'));
+const extension=path.resolve('dist/chrome');
+const context=await chromium.launchPersistentContext(profile,{executablePath:process.env.CHROME_PATH||'/usr/bin/google-chrome-stable',headless:true,args:['--no-sandbox','--disable-features=DisableLoadExtensionCommandLineSwitch',`--disable-extensions-except=${extension}`,`--load-extension=${extension}`]});
+try{
+ const worker=context.serviceWorkers()[0]||await context.waitForEvent('serviceworker',{timeout:15000});
+ const id=new URL(worker.url()).host;console.log('Loaded extension service worker:',id);
+ const page=await context.newPage();await page.emulateMedia({reducedMotion:'reduce'});const errors=[];page.on('pageerror',e=>errors.push(e.message));
+ await page.goto(`chrome-extension://${id}/options.html`);await page.getByRole('heading',{name:'Your feed. Your rules.'}).waitFor({timeout:10000});
+ await mkdir('artifacts/qa',{recursive:true});await page.screenshot({path:'artifacts/qa/options.png',fullPage:true});
+ console.log('Options rendered');
+ await page.setViewportSize({width:390,height:650});await page.goto(`chrome-extension://${id}/popup.html`);await page.getByRole('button',{name:'Blur matches',exact:true}).click();
+ console.log('Global blur setting:',await worker.evaluate(async()=> (await chrome.storage.local.get('storageData')).storageData.mode));
+ await page.screenshot({path:'artifacts/qa/popup.png',fullPage:true});
+ await page.goto(`chrome-extension://${id}/options.html`);
+ await page.getByRole('heading',{name:'Your feed. Your rules.'}).waitFor();
+ if(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth))throw Error('Mobile options overflow');
+ await page.emulateMedia({colorScheme:'dark',reducedMotion:'reduce'});await page.screenshot({path:'artifacts/qa/options-mobile-dark.png',fullPage:true});
+ await page.setViewportSize({width:1280,height:900});
+ await page.getByRole('button',{name:'New rule',exact:true}).click();
+ await page.getByLabel('Keyword, ID, or /regex/i').fill('fixture-keyword');
+ await page.getByRole('button',{name:'Add to changes'}).click();
+ await page.getByRole('button',{name:'Save changes',exact:true}).click();
+ await page.getByRole('button',{name:'Privacy & lock'}).click();
+ await page.getByLabel('Choose a password').fill('youblock-qa-password');
+ await page.getByLabel('Confirm password').fill('youblock-qa-password');
+ await page.getByRole('button',{name:'Set password',exact:true}).click();
+ await page.getByRole('button',{name:'Unlock settings'}).waitFor();
+ await page.getByLabel('Password',{exact:true}).fill('youblock-qa-password');
+ await page.getByRole('button',{name:'Unlock settings'}).click();
+ await page.getByRole('button',{name:'Lock',exact:true}).click();
+ await page.getByRole('button',{name:'Unlock settings'}).waitFor();
+ console.log('Actual UI: rule created, saved, settings unlocked and explicitly relocked');
+ await page.evaluate(()=>chrome.runtime.sendMessage({type:'reset'}));
+ // A controlled YouTube-origin document exercises actual manifest injection and bridge.
+ await context.route('https://www.youtube.com/youblock-fixture',route=>route.fulfill({contentType:'text/html',body:'<!doctype html><html><head><title>YouBlock fixture</title></head><body><ytd-video-renderer><h3 id="video-title">spoiler ending</h3><a href="/watch?v=fixture123">Watch</a></ytd-video-renderer><ytd-video-renderer><h3 id="video-title">A quiet garden</h3><a href="/watch?v=safe123">Watch</a></ytd-video-renderer></body></html>'}));
+ await page.goto(`chrome-extension://${id}/options.html`);
+ await page.evaluate(async()=>{const s=await chrome.runtime.sendMessage({type:'get'});s.data.settings.mode='blur';s.data.settings.rules=[{id:'qa',field:'title',pattern:'spoiler',action:'inherit',enabled:true}];await chrome.runtime.sendMessage({type:'save',data:s.data.settings})});
+ await page.goto('https://www.youtube.com/youblock-fixture');await page.locator('[data-yb-action="blur"]').waitFor({state:'attached'});
+ await page.getByRole('button',{name:'Reveal for 3 seconds'}).click();await page.locator('[data-yb-action]').waitFor({state:'detached'});console.log('Actual extension fixture: concealed matching card and revealed on explicit click');
+ if(process.argv.includes('--live')){
+  const live=await context.newPage();
+  await live.goto('https://www.youtube.com/results?search_query=calm+gardening',{waitUntil:'domcontentloaded',timeout:30000});
+  await live.locator('ytd-video-renderer').first().waitFor({timeout:20000});
+  const title=(await live.locator('ytd-video-renderer #video-title').first().textContent()).trim();
+  const videoId=await live.locator('ytd-video-renderer a#video-title').first().getAttribute('href');
+  const targetId=new URL(videoId,'https://www.youtube.com').searchParams.get('v');
+  const settingsPage=await context.newPage();await settingsPage.goto(`chrome-extension://${id}/options.html`);
+  await settingsPage.evaluate(async targetId=>{const s=await chrome.runtime.sendMessage({type:'get'});s.data.settings.mode='blur';s.data.settings.rules=[{id:'live',field:'videoId',pattern:targetId,action:'inherit',enabled:true}];const r=await chrome.runtime.sendMessage({type:'save',data:s.data.settings});if(!r.ok)throw Error(r.error)},targetId);
+  const matched=live.locator('ytd-video-renderer').filter({has:live.locator(`a[href*="v=${targetId}"]`)}).first();
+  await matched.locator('[data-yb-cover]').waitFor({state:'visible',timeout:10000});
+  console.log('Live search video concealed:',title);
+  await live.screenshot({path:'artifacts/qa/live-youtube.png'});
+  await settingsPage.evaluate(async()=>{const s=await chrome.runtime.sendMessage({type:'get'});s.data.settings.rules=[];await chrome.runtime.sendMessage({type:'save',data:s.data.settings})});
+  await matched.locator('[data-yb-cover]').waitFor({state:'detached'});console.log('Live search restored after rule removal');
+ }
+ if(errors.length)throw Error('Page errors: '+errors.join('\n'));
+ console.log('Chrome smoke passed');
+}finally{await context.close();await rm(profile,{recursive:true,force:true})}

@@ -1,0 +1,95 @@
+// Real manifest injection and rendering; optionally check the current live search panel.
+import assert from 'node:assert/strict';
+import {chromium} from '@playwright/test';
+import {mkdtemp,mkdir,rm} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import path from 'node:path';
+const profile=await mkdtemp(path.join(tmpdir(),'youblock-search-'));
+const extension=path.resolve('dist/chrome');
+const context=await chromium.launchPersistentContext(profile,{executablePath:process.env.CHROME_PATH||chromium.executablePath(),headless:true,args:['--no-sandbox',`--disable-extensions-except=${extension}`,`--load-extension=${extension}`]});
+try {
+ const worker=context.serviceWorkers()[0]||await context.waitForEvent('serviceworker',{timeout:15000});
+ const id=new URL(worker.url()).host;
+ const options=await context.newPage();await options.goto(`chrome-extension://${id}/options.html`);
+ async function rules(entries){await options.evaluate(async entries=>{const state=await chrome.runtime.sendMessage({type:'get'});state.data.settings.rules=entries;state.data.settings.mode='blur';const response=await chrome.runtime.sendMessage({type:'save',data:state.data.settings});if(!response.ok)throw Error(response.error)},entries)}
+ const rule=(field,pattern,action='blur')=>({id:crypto.randomUUID(),field,pattern,action,enabled:true});
+ const errors=[];const page=await context.newPage();page.on('pageerror',e=>errors.push(e.message));
+ await mkdir('artifacts/qa',{recursive:true});
+ const fixture=`<!doctype html><html><head><style>body{margin:24px;background:#0f0f0f;color:white;font:16px system-ui}ytd-universal-watch-card-renderer{display:block;width:430px}ytd-watch-card-rich-header-renderer{display:block;padding:20px;background:#252525}ytd-watch-card-hero-video-renderer,ytd-watch-card-compact-video-renderer{display:block;position:relative;margin-bottom:16px;border-radius:12px}a{display:block;color:inherit;text-decoration:none}.thumbnail{height:180px;background:linear-gradient(35deg,#874b18,#4d77ba,#4e2434)}.title{padding:18px;background:#252525;font-weight:700}#title{font-size:24px}</style></head><body><ytd-universal-watch-card-renderer><ytd-watch-card-rich-header-renderer><div id="title">Grand Theft Auto VI</div></ytd-watch-card-rich-header-renderer><ytd-watch-card-hero-video-renderer><a href="/watch?v=hero"><div class="thumbnail"></div><div class="title">Grand Theft Auto VI: The Festival</div></a></ytd-watch-card-hero-video-renderer><ytd-watch-card-compact-video-renderer><a href="/watch?v=blocked"><div class="thumbnail"></div><div class="title">Grand Theft Auto VI Launch Trailer</div></a></ytd-watch-card-compact-video-renderer><ytd-watch-card-compact-video-renderer><a href="/watch?v=safe"><div class="title">A safe unrelated video</div></a></ytd-watch-card-compact-video-renderer></ytd-universal-watch-card-renderer></body></html>`;
+ await context.route('https://www.youtube.com/youblock-search-fixture',route=>route.fulfill({contentType:'text/html',body:fixture}));
+ await rules([rule('title','Grand Theft Auto')]);await page.goto('https://www.youtube.com/youblock-search-fixture');
+ const panel=page.locator('ytd-universal-watch-card-renderer');
+ await page.waitForFunction(()=>document.querySelector('ytd-universal-watch-card-renderer')?.getAttribute('data-yb-action')==='blur');
+ assert.equal(await panel.evaluate(e=>getComputedStyle(e).borderRadius),'16px','Blur is clipped to rounded corners');
+ assert.equal(await panel.evaluate(e=>getComputedStyle(e).visibility),'visible','Blur must render the original content');
+ assert.equal(await panel.locator('ytd-watch-card-rich-header-renderer').evaluate(e=>getComputedStyle(e).filter),'blur(48px)');
+ assert.equal(await panel.locator(':scope > [data-yb-cover]').evaluate(e=>getComputedStyle(e).backgroundColor),'rgba(0, 0, 0, 0)','Reveal overlay must not paint a solid block');
+ assert.equal(await panel.locator('ytd-watch-card-rich-header-renderer').getAttribute('aria-hidden'),'true');
+ await page.screenshot({path:'artifacts/qa/search-panel-blur.png'});
+ await panel.locator(':scope > [data-yb-cover]').getByRole('button',{name:'Reveal for 3 seconds'}).click();
+ assert.equal(await panel.getAttribute('data-yb-action'),null);
+ const content=panel.locator('ytd-watch-card-rich-header-renderer');
+ const revealTween=await content.evaluate(e=>{
+  const animation=e.getAnimations().find(a=>a.transitionProperty==='filter');
+  if(!animation)return null;
+  animation.pause();animation.currentTime=100;
+  return {duration:animation.effect.getTiming().duration,filter:getComputedStyle(e).filter};
+ });
+ assert.equal(revealTween?.duration,200,'Pointer reveal animates for 200ms');
+ const blurAmount=Number(revealTween.filter.match(/blur\(([\d.]+)px\)/)?.[1]);
+ assert.ok(blurAmount>0&&blurAmount<48,'Reveal has a real intermediate blur state');
+ await page.screenshot({path:'artifacts/qa/reveal-mid-transition.png'});
+ await content.evaluate(e=>e.getAnimations().forEach(a=>a.play()));
+ await page.waitForFunction(()=>[...document.querySelector('ytd-universal-watch-card-renderer').children].filter(e=>!e.hasAttribute('data-yb-cover')).every(e=>getComputedStyle(e).filter==='none'));
+ assert.equal(await panel.locator('[data-yb-action]').count(),0,'A revealed panel must not leave its children blurred');
+ await page.waitForFunction(()=>document.querySelector('ytd-universal-watch-card-renderer')?.getAttribute('data-yb-action')==='blur',{},{timeout:5000});
+ const reblurTween=await content.evaluate(e=>{const animation=e.getAnimations().find(a=>a.transitionProperty==='filter');if(!animation)return null;animation.pause();animation.currentTime=100;return {duration:animation.effect.getTiming().duration}});
+ assert.equal(reblurTween?.duration,200,'Expiry animates the return to blur');
+ await page.waitForFunction(()=>!document.querySelector('[data-yb-reveal-motion]'));
+ assert.equal(await panel.locator(':scope > [data-yb-cover] button').textContent(),'','Reveal uses an icon with no visible text');
+ assert.equal(await panel.locator('ytd-watch-card-rich-header-renderer').evaluate(e=>getComputedStyle(e).filter),'blur(48px)');
+ await page.emulateMedia({reducedMotion:'reduce'});
+ await panel.locator(':scope > [data-yb-cover]').getByRole('button',{name:'Reveal for 3 seconds'}).click();
+ assert.equal(await panel.getAttribute('data-yb-reveal-motion'),null,'Reduced-motion reveal is immediate');
+ assert.equal(await content.evaluate(e=>getComputedStyle(e).filter),'none');
+ await page.emulateMedia({reducedMotion:'no-preference'});
+ await page.reload();await page.waitForFunction(()=>document.querySelector('ytd-universal-watch-card-renderer')?.getAttribute('data-yb-action')==='blur');
+ await panel.locator(':scope > [data-yb-cover]').getByRole('button',{name:'Reveal for 3 seconds'}).focus();
+ await page.keyboard.press('Enter');
+ assert.equal(await panel.getAttribute('data-yb-reveal-motion'),null,'Keyboard reveal is immediate');
+ assert.equal(await content.evaluate(e=>getComputedStyle(e).filter),'none');
+ // A fresh route starts the next independent filtering check.
+ await page.reload();await rules([rule('videoId','blocked')]);
+ const blocked=panel.locator('ytd-watch-card-compact-video-renderer').first();
+ await page.waitForFunction(()=>document.querySelector('ytd-watch-card-compact-video-renderer')?.getAttribute('data-yb-action')==='blur');
+ assert.equal(await panel.getAttribute('data-yb-action'),null,'One matched child must not blur its whole collection');
+ assert.equal(await panel.locator('ytd-watch-card-hero-video-renderer').getAttribute('data-yb-action'),null);
+ assert.equal(await panel.locator('ytd-watch-card-compact-video-renderer').last().getAttribute('data-yb-action'),null);
+ assert.equal(await blocked.locator('a').evaluate(e=>getComputedStyle(e).filter),'blur(48px)');
+ await page.screenshot({path:'artifacts/qa/search-child-blur.png'});
+ await rules([rule('videoId','blocked','hide')]);
+ await page.waitForFunction(()=>document.querySelector('ytd-watch-card-compact-video-renderer')?.getAttribute('data-yb-action')==='hide');
+ assert.equal(await blocked.evaluate(e=>getComputedStyle(e).display),'none');
+ await rules([]);await page.waitForFunction(()=>!document.querySelector('[data-yb-action]'));
+ assert.equal(await blocked.locator('a').getAttribute('inert'),null);
+ assert.equal(await blocked.locator('a').evaluate(e=>getComputedStyle(e).filter),'none');
+ console.log('Injected search fixture: panel/child blur, transparent reveal control, hide, and restoration passed');
+ if(process.argv.includes('--live')) {
+  await rules([rule('title','/gta\\s*6|grand theft auto/i')]);
+  await page.goto('https://www.youtube.com/results?search_query=gta+6',{waitUntil:'domcontentloaded',timeout:30000});
+  await panel.waitFor({timeout:20000});
+  await page.waitForFunction(()=>document.querySelector('ytd-universal-watch-card-renderer')?.getAttribute('data-yb-action')==='blur',{},{timeout:15000});
+  assert.ok(await panel.locator('ytd-watch-card-rich-header-renderer').evaluate(e=>{for(let node=e;node&&!node.matches('ytd-universal-watch-card-renderer');node=node.parentElement)if(getComputedStyle(node).filter==='blur(48px)')return true;return false}),'Live panel heading is inside a strongly blurred content layer');
+  await page.screenshot({path:'artifacts/qa/live-search-panel-blur.png'});
+  const child=panel.locator('ytd-watch-card-compact-video-renderer').first();
+  const href=await child.locator('a[href*="watch?v="]').first().getAttribute('href');
+  const target=new URL(href,'https://www.youtube.com').searchParams.get('v');assert.ok(target);
+  await rules([rule('videoId',target)]);
+  await page.waitForFunction(id=>{const panel=document.querySelector('ytd-universal-watch-card-renderer');const child=[...panel.querySelectorAll('ytd-watch-card-compact-video-renderer')].find(e=>e.querySelector(`a[href*="v=${id}"]`));return !panel.hasAttribute('data-yb-action')&&child?.getAttribute('data-yb-action')==='blur'},target);
+  assert.equal(await panel.locator('ytd-watch-card-hero-video-renderer').getAttribute('data-yb-action'),null);
+  await page.screenshot({path:'artifacts/qa/live-search-child-blur.png'});
+  await rules([]);await page.waitForFunction(()=>!document.querySelector('[data-yb-action]'));
+  console.log('Live GTA search: whole matching panel blurred, exact-ID child filtered independently, then restored');
+ }
+ assert.deepEqual(errors,[],'No page errors');
+} finally {await context.close();await rm(profile,{recursive:true,force:true})}
