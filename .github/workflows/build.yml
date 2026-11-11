@@ -13,7 +13,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm test
-      - run: npm run package
+      - run: npm run test:package
       - run: npx playwright install --with-deps chromium
       - run: node scripts/test-popup.mjs
       - run: node scripts/test-search.mjs

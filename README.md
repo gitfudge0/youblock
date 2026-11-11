@@ -24,9 +24,29 @@ Build outputs:
 | --- | --- |
 | `dist/chrome/` | Load unpacked in Chrome |
 | `dist/firefox/` | Load temporarily in Firefox |
-| `artifacts/youblock-chrome-0.1.0.zip` | Unzip for Chrome developer mode; source for a later Web Store submission |
-| `artifacts/youblock-firefox-0.1.0.zip` | Firefox temporary installation / source for Mozilla signing |
+| `artifacts/youblock-chrome-<version>.zip` | Unzip for Chrome developer mode; source for a later Web Store submission |
+| `artifacts/youblock-firefox-<version>.zip` | Firefox temporary installation / source for Mozilla signing |
 | `artifacts/SHA256SUMS` | Package integrity checksums |
+
+### Tagged GitHub releases
+
+Each release uses a stable `vX.Y.Z` Git tag and attaches both browser ZIPs plus `SHA256SUMS` to a GitHub Release. Download these assets rather than GitHub’s automatic source archives. `package.json` supplies the version for both manifests and filenames; the release workflow rejects tags or lockfile versions that do not match it.
+
+From a clean, up-to-date checkout on `main`:
+
+```sh
+npm ci
+npm test
+npm run test:package
+npm version patch                 # or minor / major; commits the version and creates vX.Y.Z
+# Use the newly created tag below, for example v0.1.1:
+git push origin main
+git push origin v0.1.1
+```
+
+Pushing the tag starts `.github/workflows/release.yml`: validate the version, run tests, build and inspect both ZIPs, then upload the assets to a draft release and publish it. No personal access token is required; the publishing job uses GitHub’s repository token with `contents: write`. A failed upload leaves a draft for inspection; delete that draft before rerunning the workflow. Do not move published version tags; release fixes with a new version. No release is created until a tag is pushed.
+
+These are developer-install packages. Chrome requires extracting the ZIP and **Load unpacked**; a downloadable CRX is not a general installation solution on Windows/macOS. The Firefox ZIP is unsigned and supports temporary installation only. A permanently installable, drag-and-drop Firefox XPI requires Mozilla signing with an AMO account/API credentials and a separate signing process; renaming the ZIP does not work. See [Chrome distribution](https://developer.chrome.com/docs/extensions/how-to/distribute) and [Mozilla signing](https://extensionworkshop.com/documentation/publish/signing-and-distribution-overview/).
 
 ### Chrome
 

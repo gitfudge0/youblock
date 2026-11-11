@@ -1,0 +1,60 @@
+name: Release browser packages
+on:
+  push:
+    tags:
+      - 'v*'
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: node scripts/validate-release.mjs
+      - run: npm ci
+      - run: npm test
+      - run: npm run test:package
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-packages
+          path: artifacts/
+          if-no-files-found: error
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-packages
+          path: artifacts
+      - name: Publish release with browser packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          cd artifacts
+          sha256sum --check SHA256SUMS
+          cat > /tmp/release-notes.md <<'NOTES'
+          Download the browser ZIP below (GitHub's source archives are not extension builds).
+
+          **Chrome:** extract the Chrome ZIP, enable Developer mode at chrome://extensions, choose Load unpacked, and select the extracted folder containing manifest.json.
+
+          **Firefox:** open about:debugging#/runtime/this-firefox, choose Load Temporary Add-on, and select the Firefox ZIP. This unsigned build lasts until Firefox restarts. Permanent installation requires Mozilla signing; this release does not contain a signed XPI.
+
+          See the README for installation details. SHA256SUMS contains checksums for both browser packages.
+          NOTES
+          # Draft creation includes all assets; only publish after the upload succeeds.
+          # A failed draft is deliberately retained for inspection; delete it before rerunning.
+          gh release create "$RELEASE_TAG" youblock-chrome-*.zip youblock-firefox-*.zip SHA256SUMS --verify-tag --draft --title "YouBlock $RELEASE_TAG" --notes-file /tmp/release-notes.md
+          gh release edit "$RELEASE_TAG" --draft=false

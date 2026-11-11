@@ -15,7 +15,8 @@
     "test:search": "npm run build && node scripts/test-search.mjs",
     "test:reload": "npm run build && node scripts/test-reload.mjs",
     "test:menu": "npm run build && node scripts/test-menu.mjs",
-    "test:engine": "npm run build && node scripts/test-engine.mjs"
+    "test:engine": "npm run build && node scripts/test-engine.mjs",
+    "test:package": "npm run package && node --test scripts/test-package.mjs"
   },
   "dependencies": {
     "lucide-react": "^0.468.0",
